@@ -1,0 +1,2 @@
+[console_scripts]
+matrix-viewer = matrix_viewer.matrix_viewer:main

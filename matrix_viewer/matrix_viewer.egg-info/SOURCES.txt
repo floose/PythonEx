@@ -1,0 +1,9 @@
+setup.py
+matrix_viewer/__init__.py
+matrix_viewer/matrix_viewer.py
+matrix_viewer.egg-info/PKG-INFO
+matrix_viewer.egg-info/SOURCES.txt
+matrix_viewer.egg-info/dependency_links.txt
+matrix_viewer.egg-info/entry_points.txt
+matrix_viewer.egg-info/requires.txt
+matrix_viewer.egg-info/top_level.txt
