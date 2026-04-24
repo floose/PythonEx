@@ -63,14 +63,11 @@ def _build_ybus(n_bus, lines):
 
 def _power_injections(V, theta, Y):
     G, B = Y.real, Y.imag
-    n = len(V)
-    P = np.zeros(n)
-    Q = np.zeros(n)
-    for i in range(n):
-        for k in range(n):
-            dth = theta[i] - theta[k]
-            P[i] += V[i] * V[k] * (G[i, k] * np.cos(dth) + B[i, k] * np.sin(dth))
-            Q[i] += V[i] * V[k] * (G[i, k] * np.sin(dth) - B[i, k] * np.cos(dth))
+    dth = theta[:, None] - theta[None, :]
+    c = np.cos(dth)
+    s = np.sin(dth)
+    P = V * ((G * c + B * s) @ V)
+    Q = V * ((G * s - B * c) @ V)
     return P, Q
 
 
@@ -90,25 +87,24 @@ def _jacobian(V, theta, Y, P, Q, pq_idx, non_slack_idx):
     G, B = Y.real, Y.imag
     n = len(V)
 
-    H = np.zeros((n, n))  # dP/dtheta
-    N = np.zeros((n, n))  # dP/dV
-    J = np.zeros((n, n))  # dQ/dtheta
-    L = np.zeros((n, n))  # dQ/dV
+    dth = theta[:, None] - theta[None, :]
+    c = np.cos(dth)
+    s = np.sin(dth)
+    VV = V[:, None] * V[None, :]
+    Vrow = V[:, None]
 
-    for i in range(n):
-        for k in range(n):
-            if i == k:
-                H[i, i] = -Q[i] - B[i, i] * V[i] ** 2
-                N[i, i] = P[i] / V[i] + G[i, i] * V[i]
-                J[i, i] = P[i] - G[i, i] * V[i] ** 2
-                L[i, i] = Q[i] / V[i] - B[i, i] * V[i]
-            else:
-                dth = theta[i] - theta[k]
-                s, c = np.sin(dth), np.cos(dth)
-                H[i, k] =  V[i] * V[k] * (G[i, k] * s - B[i, k] * c)
-                N[i, k] =  V[i] * (G[i, k] * c + B[i, k] * s)
-                J[i, k] = -V[i] * V[k] * (G[i, k] * c + B[i, k] * s)
-                L[i, k] =  V[i] * (G[i, k] * s - B[i, k] * c)
+    H = VV * (G * s - B * c)
+    N = Vrow * (G * c + B * s)
+    J = -VV * (G * c + B * s)
+    L = Vrow * (G * s - B * c)
+
+    idx = np.arange(n)
+    gd = np.diag(G)
+    bd = np.diag(B)
+    H[idx, idx] = -Q - bd * V ** 2
+    N[idx, idx] = P / V + gd * V
+    J[idx, idx] = P - gd * V ** 2
+    L[idx, idx] = Q / V - bd * V
 
     Hns = H[np.ix_(non_slack_idx, non_slack_idx)]
     Nns = N[np.ix_(non_slack_idx, pq_idx)]
@@ -205,7 +201,7 @@ def newton_raphson(bus, lines, tol=1e-6, max_iter=20, verbose=True):
 
 # ---------- transmission losses ----------
 
-def _line_losses(V, theta, lines):
+def line_losses(V, theta, lines):
     """Calculate real and reactive power losses on each transmission line."""
     losses = []
     for f, t, r, x, b in lines:
@@ -249,7 +245,7 @@ def print_losses(V, theta, lines, bus=None):
 
     If bus data is provided, also shows loss as percentage of generation.
     """
-    losses = _line_losses(V, theta, lines)
+    losses = line_losses(V, theta, lines)
 
     # Sort by real power loss (descending)
     losses_sorted = sorted(losses, key=lambda x: x['P_loss'], reverse=True)
