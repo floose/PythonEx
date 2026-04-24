@@ -5,7 +5,7 @@ Bus types: 3 = slack, 2 = PV, 1 = PQ.
 """
 
 import numpy as np
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import coo_matrix, bmat
 from scipy.sparse.linalg import spsolve
 
 #MACROS for bus types
@@ -89,37 +89,46 @@ def _mismatches(P_calc, Q_calc, P_spec, Q_spec, pq_idx, non_slack_idx, Q_limited
 # ---------- Jacobian ----------
 
 def _jacobian(V, theta, Y, P, Q, pq_idx, non_slack_idx):
-    Y_dense = Y.toarray()  # 3a: temporary — densify for the vectorized path
-    G, B = Y_dense.real, Y_dense.imag
     n = len(V)
+    Ycoo = Y.tocoo()
+    rows, cols = Ycoo.row, Ycoo.col
+    G_nz = Ycoo.data.real
+    B_nz = Ycoo.data.imag
 
-    dth = theta[:, None] - theta[None, :]
+    dth = theta[rows] - theta[cols]
     c = np.cos(dth)
     s = np.sin(dth)
-    VV = V[:, None] * V[None, :]
-    Vrow = V[:, None]
+    Vr = V[rows]
+    VrVc = Vr * V[cols]
 
-    H = VV * (G * s - B * c)
-    N = Vrow * (G * c + B * s)
-    J = -VV * (G * c + B * s)
-    L = Vrow * (G * s - B * c)
+    H_data = VrVc * (G_nz * s - B_nz * c)
+    N_data = Vr * (G_nz * c + B_nz * s)
+    J_data = -VrVc * (G_nz * c + B_nz * s)
+    L_data = Vr * (G_nz * s - B_nz * c)
 
-    idx = np.arange(n)
-    gd = np.diag(G)
-    bd = np.diag(B)
-    H[idx, idx] = -Q - bd * V ** 2
-    N[idx, idx] = P / V + gd * V
-    J[idx, idx] = P - gd * V ** 2
-    L[idx, idx] = Q / V - bd * V
+    # Overwrite diagonal entries (Y always has a non-zero diagonal in this model)
+    is_diag = rows == cols
+    d_bus = rows[is_diag]
+    V_d = V[d_bus]
+    G_d = G_nz[is_diag]
+    B_d = B_nz[is_diag]
+    H_data[is_diag] = -Q[d_bus] - B_d * V_d ** 2
+    N_data[is_diag] = P[d_bus] / V_d + G_d * V_d
+    J_data[is_diag] = P[d_bus] - G_d * V_d ** 2
+    L_data[is_diag] = Q[d_bus] / V_d - B_d * V_d
 
-    Hns = H[np.ix_(non_slack_idx, non_slack_idx)]
-    Nns = N[np.ix_(non_slack_idx, pq_idx)]
-    Jns = J[np.ix_(pq_idx,        non_slack_idx)]
-    Lns = L[np.ix_(pq_idx,        pq_idx)]
+    shape = (n, n)
+    H = coo_matrix((H_data, (rows, cols)), shape=shape).tocsr()
+    N = coo_matrix((N_data, (rows, cols)), shape=shape).tocsr()
+    J = coo_matrix((J_data, (rows, cols)), shape=shape).tocsr()
+    L = coo_matrix((L_data, (rows, cols)), shape=shape).tocsr()
 
-    top    = np.hstack([Hns, Nns])
-    bottom = np.hstack([Jns, Lns])
-    return np.vstack([top, bottom])
+    Hns = H[non_slack_idx, :][:, non_slack_idx]
+    Nns = N[non_slack_idx, :][:, pq_idx]
+    Jns = J[pq_idx, :][:, non_slack_idx]
+    Lns = L[pq_idx, :][:, pq_idx]
+
+    return bmat([[Hns, Nns], [Jns, Lns]], format="csc")
 
 
 # ---------- Q limit checking ----------
@@ -199,7 +208,7 @@ def newton_raphson(bus, lines, tol=1e-6, max_iter=20, verbose=True):
         if err < tol:
             return V, theta, Y, Q, it
         Jac = _jacobian(V, theta, Y, P, Q, pq_idx, non_slack_idx)
-        dx = spsolve(csr_matrix(Jac), f)
+        dx = spsolve(Jac, f)
         V, theta = _update_state(V, theta, dx, pq_idx, non_slack_idx)
 
     raise RuntimeError(f"did not converge in {max_iter} iterations")
