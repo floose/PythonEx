@@ -6,8 +6,12 @@ Bus types: 3 = slack, 2 = PV, 1 = PQ.
 
 import numpy as np
 
+#MACROS for bus types
 SLACK, PV, PQ, SVC = 3, 2, 1, 4
-
+#MACROS for bus data columns
+BUS_NUM, BUS_TYPE, V_INIT, THETA_INIT, P_GEN, Q_GEN, P_LOAD, Q_LOAD, Q_MIN, Q_MAX = range(10)   
+#Macros for line data columns
+FROM_BUS, TO_BUS, R, X, B = range(5)    
 
 # ---------- system data ----------
 
@@ -22,6 +26,7 @@ def bus_data():
         [4, SVC,   1.03,  0.0, 0.0, 0.0, 0.0,  0.0,  -0.3,  0.3],
         [5, PQ,    1.0,   0.0, 0.0, 0.0, 0.6,  0.10, -INF,  INF],
         [6, PQ,    1.0,   0.0, 0.0, 0.0, 0.6,  0.10, -INF,  INF],
+        [7, PQ,    1.0,   0.0, 0.0, 0.0, 0.0,  0.20, INF,  INF],
     ])
 
 
@@ -36,12 +41,13 @@ def line_data():
         [3, 4, 0.01, 0.03, 0.02],
         [4, 5, 0.08, 0.24, 0.05],
         [6, 5, 0.08, 0.24, 0.05],
+        [7, 5, 0.08, 0.24, 0.05],
     ])
 
 
 # ---------- admittance matrix ----------
 
-def build_ybus(n_bus, lines):
+def _build_ybus(n_bus, lines):
     Y = np.zeros((n_bus, n_bus), dtype=complex)
     for f, t, r, x, b in lines:
         i, j = int(f) - 1, int(t) - 1
@@ -55,7 +61,7 @@ def build_ybus(n_bus, lines):
 
 # ---------- power injections ----------
 
-def power_injections(V, theta, Y):
+def _power_injections(V, theta, Y):
     G, B = Y.real, Y.imag
     n = len(V)
     P = np.zeros(n)
@@ -68,7 +74,7 @@ def power_injections(V, theta, Y):
     return P, Q
 
 
-def mismatches(P_calc, Q_calc, P_spec, Q_spec, pq_idx, non_slack_idx, bus, Q_limited):
+def _mismatches(P_calc, Q_calc, P_spec, Q_spec, pq_idx, non_slack_idx, Q_limited):
     dP = (P_spec - P_calc)[non_slack_idx]
     dQ = (Q_spec - Q_calc)[pq_idx]
     # For SVC buses in PQ set that are limited, zero out their mismatch
@@ -80,7 +86,7 @@ def mismatches(P_calc, Q_calc, P_spec, Q_spec, pq_idx, non_slack_idx, bus, Q_lim
 
 # ---------- Jacobian ----------
 
-def jacobian(V, theta, Y, P, Q, pq_idx, non_slack_idx):
+def _jacobian(V, theta, Y, P, Q, pq_idx, non_slack_idx):
     G, B = Y.real, Y.imag
     n = len(V)
 
@@ -116,12 +122,12 @@ def jacobian(V, theta, Y, P, Q, pq_idx, non_slack_idx):
 
 # ---------- Q limit checking ----------
 
-def check_q_limits(Q, bus):
+def _check_q_limits(Q, bus):
     """Clamp Q for SVC buses and return set of limited bus indices."""
     Q_limited = set()
-    types = bus[:, 1].astype(int)
-    Q_min = bus[:, 8]
-    Q_max = bus[:, 9]
+    types = bus[:, BUS_TYPE].astype(int)
+    Q_min = bus[:, Q_MIN]
+    Q_max = bus[:, Q_MAX]
     for i in range(len(Q)):
         if types[i] == SVC:
             if Q[i] > Q_max[i]:
@@ -135,7 +141,7 @@ def check_q_limits(Q, bus):
 
 
 
-def update_state(V, theta, dx, pq_idx, non_slack_idx):
+def _update_state(V, theta, dx, pq_idx, non_slack_idx):
     n_ns = len(non_slack_idx)
     dtheta = dx[:n_ns]
     dV = dx[n_ns:]
@@ -146,72 +152,155 @@ def update_state(V, theta, dx, pq_idx, non_slack_idx):
 
 # ---------- solver ----------
 
-def newton_raphson(bus, lines, tol=1e-6, max_iter=20):
+def newton_raphson(bus, lines, tol=1e-6, max_iter=20, verbose=True):
     n = bus.shape[0]
-    Y = build_ybus(n, lines)
+    Y = _build_ybus(n, lines)
 
-    types = bus[:, 1].astype(int)
-    V     = bus[:, 2].copy()
-    theta = np.deg2rad(bus[:, 3].copy())
-    P_spec = (bus[:, 4] - bus[:, 6])  # Pgen - Pload
-    Q_spec = (bus[:, 5] - bus[:, 7])  # Qgen - Qload
+    types = bus[:, BUS_TYPE].astype(int)
+    V     = bus[:, V_INIT].copy()
+    theta = np.deg2rad(bus[:, THETA_INIT].copy())
+    P_spec = (bus[:, P_GEN] - bus[:, P_LOAD])  # Pgen - Pload
+    Q_spec = (bus[:, Q_GEN] - bus[:, Q_LOAD])  # Qgen - Qload
 
     pq_idx        = np.where((types == PQ) | (types == SVC))[0]
     non_slack_idx = np.where(types != SLACK)[0]
     Q_limited     = set()
 
+    if verbose:
+        print("PQ/SVC bus indices:", pq_idx)
+        print("SVC bus Q limits:")
+        for i in pq_idx:
+            if types[i] == SVC:
+                print(f"  Bus {int(bus[i,BUS_NUM])} (idx {i}): Q_min={bus[i,Q_MIN]:.2f}, Q_max={bus[i,Q_MAX]:.2f}")
+
     for it in range(1, max_iter + 1):
-        P, Q = power_injections(V, theta, Y)
+        P, Q = _power_injections(V, theta, Y)
 
         # Check and clamp Q limits for SVC buses
-        Q_limited = check_q_limits(Q, bus)
+        Q_limited = _check_q_limits(Q, bus)
 
-        f = mismatches(P, Q, P_spec, Q_spec, pq_idx, non_slack_idx, bus, Q_limited)
+        # Debug: show SVC Q values
+        if it == 1 and verbose and len(pq_idx) < 50:  # Only on first iteration and for small systems
+            print("\nFirst iteration Q values for SVCs:")
+            for i in pq_idx:
+                if types[i] == SVC:
+                    print(f"  Bus {int(bus[i,BUS_NUM])} (idx {i}): Q_calc={Q[i]:7.4f}, limits=[{bus[i,Q_MIN]:6.2f}, {bus[i,Q_MAX]:6.2f}]")
+
+        f = _mismatches(P, Q, P_spec, Q_spec, pq_idx, non_slack_idx, Q_limited)
         err = np.max(np.abs(f))
-        print(f"iter {it:2d}   max mismatch = {err:.3e}", end="")
-        if Q_limited:
-            print(f"   Q limited at buses: {sorted(Q_limited)}", end="")
-        print()
+        if verbose:
+            print(f"iter {it:2d}   max mismatch = {err:.3e}", end="")
+            if Q_limited:
+                print(f"   Q limited at buses: {sorted(Q_limited)}", end="")
+            print()
 
         if err < tol:
             return V, theta, Y, Q, it
-        Jac = jacobian(V, theta, Y, P, Q, pq_idx, non_slack_idx)
+        Jac = _jacobian(V, theta, Y, P, Q, pq_idx, non_slack_idx)
         dx = np.linalg.solve(Jac, f)
-        V, theta = update_state(V, theta, dx, pq_idx, non_slack_idx)
+        V, theta = _update_state(V, theta, dx, pq_idx, non_slack_idx)
 
     raise RuntimeError(f"did not converge in {max_iter} iterations")
 
 
-# ---------- reporting ----------
+# ---------- transmission losses ----------
 
-def slack_and_pv_injections(V, theta, Y, bus):
-    P, Q = power_injections(V, theta, Y)
-    types = bus[:, 1].astype(int)
-    Pload = bus[:, 6]
-    Qload = bus[:, 7]
-    Pgen = P + Pload
-    Qgen = Q + Qload
-    # keep specified gens where not solved
-    Pgen[types != SLACK] = bus[types != SLACK, 4]
-    return Pgen, Qgen
+def _line_losses(V, theta, lines):
+    """Calculate real and reactive power losses on each transmission line."""
+    losses = []
+    for f, t, r, x, b in lines:
+        i, j = int(f) - 1, int(t) - 1
+        y = 1.0 / complex(r, x)
+
+        # Complex voltages
+        Vi = V[i] * np.exp(1j * theta[i])
+        Vj = V[j] * np.exp(1j * theta[j])
+
+        # Current from i to j
+        I_ij = y * (Vi - Vj)
+        # Power from i to j
+        S_ij = Vi * np.conj(I_ij)
+
+        # Current from j to i
+        I_ji = y * (Vj - Vi)
+        # Power from j to i
+        S_ji = Vj * np.conj(I_ji)
+
+        # Loss = power out of one end + power out of other end
+        P_loss = S_ij.real + S_ji.real
+        Q_loss = S_ij.imag + S_ji.imag
+        S_loss = np.sqrt(P_loss**2 + Q_loss**2)
+
+        losses.append({
+            'from': int(f),
+            'to': int(t),
+            'P_loss': P_loss,
+            'Q_loss': Q_loss,
+            'S_loss': S_loss,
+            'P_ij': S_ij.real,
+            'P_ji': S_ji.real,
+        })
+
+    return losses
+
+
+def print_losses(V, theta, lines, bus=None):
+    """Print total and per-line losses sorted by real power loss (highest first).
+
+    If bus data is provided, also shows loss as percentage of generation.
+    """
+    losses = _line_losses(V, theta, lines)
+
+    # Sort by real power loss (descending)
+    losses_sorted = sorted(losses, key=lambda x: x['P_loss'], reverse=True)
+
+    total_P_loss = sum(l['P_loss'] for l in losses)
+    total_Q_loss = sum(l['Q_loss'] for l in losses)
+    total_S_loss = np.sqrt(total_P_loss**2 + total_Q_loss**2)
+
+    print("\n" + "=" * 90)
+    print("Transmission Losses (sorted by real power loss)")
+    print("=" * 90)
+    print(f"\nTotal Real Power Loss:     {total_P_loss:8.4f} pu")
+    print(f"Total Reactive Loss:       {total_Q_loss:8.4f} pu")
+    print(f"Total Apparent Loss:       {total_S_loss:8.4f} pu")
+
+    if bus is not None:
+        # Total generation recovered from conservation: gen = load + losses
+        total_gen = np.sum(bus[:, P_LOAD]) + total_P_loss
+        if total_gen > 0:
+            loss_pct = total_P_loss / total_gen * 100
+            print(f"Loss as % of Generation:   {loss_pct:8.2f}%")
+
+    print(f"\n{'Line':>12} {'P Loss':>10} {'Q Loss':>10} {'S Loss':>10} {'P i→j':>10} {'P j→i':>10}")
+    print("-" * 90)
+
+    for loss in losses_sorted:
+        line_label = f"{loss['from']:3d}→{loss['to']:3d}"
+        print(f"{line_label:>12} {loss['P_loss']:10.4f} {loss['Q_loss']:10.4f} {loss['S_loss']:10.4f} "
+              f"{loss['P_ij']:10.4f} {loss['P_ji']:10.4f}")
+
+    print("=" * 90)
+
+
 
 
 def print_results(V, theta, Y, Q, bus):
-    P, _ = power_injections(V, theta, Y)
-    types = bus[:, 1].astype(int)
-    Pload = bus[:, 6]
-    Qload = bus[:, 7]
+    P, _ = _power_injections(V, theta, Y)
+    types = bus[:, BUS_TYPE].astype(int)
+    Pload = bus[:, P_LOAD]
+    Qload = bus[:, Q_LOAD]
     Pgen = P + Pload
     Qgen = Q + Qload
     # keep specified gens where not solved
-    Pgen[types != SLACK] = bus[types != SLACK, 4]
+    Pgen[types != SLACK] = bus[types != SLACK, P_GEN]
     print("\nBus results")
-    print(f"{'bus':>4} {'type':>6} {'|V| pu':>9} {'angle deg':>11} {'Pgen':>8} {'Qgen':>8} {'Q range':>12}")
+    print(f"{'bus':>4} {'type':>6} {'|V| pu':>9} {'angle deg':>11} {'Pgen':>8} {'Qgen':>8} {'Pcon':>8} {'Qcon':>8} {'Q range':>12}")
     for i in range(len(V)):
         type_str = {SLACK: "slack", PV: "PV", PQ: "PQ", SVC: "SVC"}[types[i]]
-        qrange = f"[{bus[i,8]:5.2f},{bus[i,9]:5.2f}]"
-        print(f"{int(bus[i,0]):>4} {type_str:>6} {V[i]:>9.4f} {np.rad2deg(theta[i]):>11.4f} "
-              f"{Pgen[i]:>8.4f} {Qgen[i]:>8.4f} {qrange:>12}")
+        qrange = f"[{bus[i,Q_MIN]:5.2f},{bus[i,Q_MAX]:5.2f}]"
+        print(f"{int(bus[i,BUS_NUM]):>4} {type_str:>6} {V[i]:>9.4f} {np.rad2deg(theta[i]):>11.4f} "
+              f"{Pgen[i]:>8.4f} {Qgen[i]:>8.4f} {Pload[i]:>8.4f} {Qload[i]:>8.4f} {qrange:>12}")
 
 
 if __name__ == "__main__":
@@ -220,3 +309,4 @@ if __name__ == "__main__":
     V, theta, Y, Q, iters = newton_raphson(bus, lines)
     print(f"\nconverged in {iters} iterations")
     print_results(V, theta, Y, Q, bus)
+    print_losses(V, theta, lines, bus)
