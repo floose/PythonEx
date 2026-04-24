@@ -66,13 +66,22 @@ def _build_ybus(n_bus, lines):
 # ---------- power injections ----------
 
 def _power_injections(V, theta, Y):
-    Y_dense = Y.toarray()  # 3a: temporary — densify for the vectorized path
-    G, B = Y_dense.real, Y_dense.imag
-    dth = theta[:, None] - theta[None, :]
+    n = len(V)
+    Ycoo = Y.tocoo()
+    rows, cols = Ycoo.row, Ycoo.col
+    G_nz = Ycoo.data.real
+    B_nz = Ycoo.data.imag
+
+    dth = theta[rows] - theta[cols]
     c = np.cos(dth)
     s = np.sin(dth)
-    P = V * ((G * c + B * s) @ V)
-    Q = V * ((G * s - B * c) @ V)
+    Vc = V[cols]
+
+    P_terms = Vc * (G_nz * c + B_nz * s)
+    Q_terms = Vc * (G_nz * s - B_nz * c)
+
+    P = V * np.bincount(rows, weights=P_terms, minlength=n)
+    Q = V * np.bincount(rows, weights=Q_terms, minlength=n)
     return P, Q
 
 
