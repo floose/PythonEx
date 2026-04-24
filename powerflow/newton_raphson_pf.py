@@ -5,6 +5,8 @@ Bus types: 3 = slack, 2 = PV, 1 = PQ.
 """
 
 import numpy as np
+from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse.linalg import spsolve
 
 #MACROS for bus types
 SLACK, PV, PQ, SVC = 3, 2, 1, 4
@@ -48,21 +50,24 @@ def line_data():
 # ---------- admittance matrix ----------
 
 def _build_ybus(n_bus, lines):
-    Y = np.zeros((n_bus, n_bus), dtype=complex)
+    rows, cols, data = [], [], []
     for f, t, r, x, b in lines:
         i, j = int(f) - 1, int(t) - 1
         y = 1.0 / complex(r, x)
-        Y[i, i] += y + 1j * b / 2
-        Y[j, j] += y + 1j * b / 2
-        Y[i, j] -= y
-        Y[j, i] -= y
+        half_b = 1j * b / 2
+        rows += [i, j, i, j]
+        cols += [i, j, j, i]
+        data += [y + half_b, y + half_b, -y, -y]
+    Y = coo_matrix((data, (rows, cols)),
+                   shape=(n_bus, n_bus), dtype=complex).tocsr()
     return Y
 
 
 # ---------- power injections ----------
 
 def _power_injections(V, theta, Y):
-    G, B = Y.real, Y.imag
+    Y_dense = Y.toarray()  # 3a: temporary — densify for the vectorized path
+    G, B = Y_dense.real, Y_dense.imag
     dth = theta[:, None] - theta[None, :]
     c = np.cos(dth)
     s = np.sin(dth)
@@ -84,7 +89,8 @@ def _mismatches(P_calc, Q_calc, P_spec, Q_spec, pq_idx, non_slack_idx, Q_limited
 # ---------- Jacobian ----------
 
 def _jacobian(V, theta, Y, P, Q, pq_idx, non_slack_idx):
-    G, B = Y.real, Y.imag
+    Y_dense = Y.toarray()  # 3a: temporary — densify for the vectorized path
+    G, B = Y_dense.real, Y_dense.imag
     n = len(V)
 
     dth = theta[:, None] - theta[None, :]
@@ -193,7 +199,7 @@ def newton_raphson(bus, lines, tol=1e-6, max_iter=20, verbose=True):
         if err < tol:
             return V, theta, Y, Q, it
         Jac = _jacobian(V, theta, Y, P, Q, pq_idx, non_slack_idx)
-        dx = np.linalg.solve(Jac, f)
+        dx = spsolve(csr_matrix(Jac), f)
         V, theta = _update_state(V, theta, dx, pq_idx, non_slack_idx)
 
     raise RuntimeError(f"did not converge in {max_iter} iterations")
