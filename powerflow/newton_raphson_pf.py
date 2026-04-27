@@ -63,6 +63,57 @@ def _build_ybus(n_bus, lines):
     return Y
 
 
+# ---------- bus impedance matrix ----------
+
+def build_zbus(Y):
+    """Compute Z-bus = Y^-1 as a dense complex matrix.
+
+    Y can be sparse (csr/csc) or a dense ndarray.
+    """
+    Y_dense = Y.toarray() if hasattr(Y, "toarray") else Y
+    return np.linalg.inv(Y_dense)
+
+
+def _print_zbus_full(Z, bus_nums):
+    """Print R-bus and X-bus (real and imaginary parts of Z) side by side."""
+    n = len(Z)
+    cell = 9
+    header = " " * 7 + "".join(f"Bus {b:>2d}".rjust(cell) for b in bus_nums)
+    for title, M in (("R-bus = Re(Z)  [pu]", Z.real),
+                     ("X-bus = Im(Z)  [pu]", Z.imag)):
+        print(f"\n{title}")
+        print(header)
+        print(" " * 7 + "-" * (cell * n))
+        for i in range(n):
+            row = f"Bus {bus_nums[i]:>2d}:"
+            for j in range(n):
+                row += f"{M[i, j]:>+9.4f}"
+            print(row)
+
+
+def _print_zbus_diagonal(Z, bus_nums):
+    """Print only the Thévenin impedance per bus."""
+    print(f"\nDiagonal only (matrix too large to display in full)")
+    print(f"{'Bus':>4} {'R (pu)':>10} {'X (pu)':>10} {'|Z| (pu)':>10}")
+    print("-" * 38)
+    for i in range(len(Z)):
+        z = Z[i, i]
+        print(f"{bus_nums[i]:>4} {z.real:>10.5f} {z.imag:>10.5f} {abs(z):>10.5f}")
+
+
+def print_zbus(Z, bus, max_full=15):
+    """Print Z-bus. Full R/X matrices for small systems, diagonal otherwise."""
+    bus_nums = bus[:, BUS_NUM].astype(int)
+    print("\n" + "=" * 70)
+    print("Z-bus matrix (Z = Y^-1, in per unit)")
+    print("=" * 70)
+    if len(Z) <= max_full:
+        _print_zbus_full(Z, bus_nums)
+    else:
+        _print_zbus_diagonal(Z, bus_nums)
+    print("=" * 70)
+
+
 # ---------- power injections ----------
 
 def _power_injections(V, theta, Y):
@@ -330,3 +381,5 @@ if __name__ == "__main__":
     print(f"\nconverged in {iters} iterations")
     print_results(V, theta, Y, Q, bus)
     print_losses(V, theta, lines, bus)
+    Z = build_zbus(Y)
+    print_zbus(Z, bus)
