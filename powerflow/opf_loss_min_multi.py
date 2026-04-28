@@ -1,13 +1,24 @@
-"""OPF phase 1b: brute-force sweep with multiple flexible Q injectors.
+"""OPF on a 10-bus system using binary search (golden-section coordinate descent).
 
-Same 6-bus system as opf_loss_min.py, but now with two compensators —
-one at bus 4 (a load bus) and one at bus 6 (the radial tail). The PF
-is run over an N-D grid of (Q_4, Q_6) values to find the combination
-that minimises total real-power losses.
+A 10-bus meshed system with 1 slack, 2 PV generators and 7 PQ buses.
+Five of the seven PQ buses (70%) are flexible reactive-power injectors.
+The optimisation finds the Q values that minimise total real-power
+losses subject to bound constraints.
 
-The implementation is N-D in principle (any number of flex buses);
-the demo uses two for visualisation, and the loss table is printed as
-a 2-D grid. With more than two, only the minimum is reported.
+Algorithm: coordinate descent + golden-section line search per axis.
+Each axis sweep narrows its bracket by factor 1/φ ≈ 0.618; outer
+iterations repeat until improvement falls below tolerance. Cost scales
+as O(d · log(range/tol)) — independent of the number of grid points.
+
+History — DEPRECATED brute-force comparison
+    Earlier versions of this script also included a brute-force grid
+    sweep for comparison. At d = 2 it was competitive (121 PFs vs ~75);
+    by d = 5 the cliff is decisive: 11^5 = 161 051 PFs (~5 minutes) vs
+    binary search's ~400 PFs (~1 second), at ~150x worse precision.
+    Brute force was retired in this version. The functions
+    sweep_grid_brute_force, find_minimum_brute_force,
+    print_grid_2d_brute_force, run_brute_force_method, and
+    print_comparison were removed; the git history preserves them.
 """
 
 import sys
@@ -20,23 +31,28 @@ import newton_raphson_pf as pf
 
 
 INF = 9999.0
-FLEX_BUS_NUMS = (4, 2)
+FLEX_BUS_NUMS = (3, 4, 6, 8, 9)
 PHI = (np.sqrt(5) - 1) / 2  # golden ratio reciprocal, ~0.618
 
 
 def bus_data():
     # bus, type, V, theta_deg, Pgen, Qgen, Pload, Qload, Q_min, Q_max
     return np.array([
-        [1, pf.SLACK, 1.05, 0.0, 0.0,  0.0, 0.0,  0.0,  -INF, INF],
-        [2, pf.PV,    1.03, 0.0, 0.80, 0.0, 0.0,  0.0,  -INF, INF],
-        [3, pf.PQ,    1.00, 0.0, 0.0,  0.0, 0.60, 0.25, -INF, INF],
-        [4, pf.PQ,    1.00, 0.0, 0.0,  0.0, 0.70, 0.30, -INF, INF],
-        [5, pf.PQ,    1.00, 0.0, 0.0,  0.0, 0.40, 0.15, -INF, INF],
-        [6, pf.PQ,    1.00, 0.0, 0.0,  0.0, 0.0,  0.0,  -INF, INF],
+        [1,  pf.SLACK, 1.05, 0.0, 0.0,  0.0, 0.0,  0.0,  -INF, INF],
+        [2,  pf.PV,    1.03, 0.0, 0.80, 0.0, 0.0,  0.0,  -INF, INF],
+        [3,  pf.PQ,    1.00, 0.0, 0.0,  0.0, 0.60, 0.25, -INF, INF],
+        [4,  pf.PQ,    1.00, 0.0, 0.0,  0.0, 0.70, 0.30, -INF, INF],
+        [5,  pf.PQ,    1.00, 0.0, 0.0,  0.0, 0.40, 0.15, -INF, INF],
+        [6,  pf.PQ,    1.00, 0.0, 0.0,  0.0, 0.0,  0.0,  -INF, INF],
+        [7,  pf.PV,    1.04, 0.0, 0.80, 0.0, 0.0,  0.0,  -INF, INF],
+        [8,  pf.PQ,    1.00, 0.0, 0.0,  0.0, 0.50, 0.20, -INF, INF],
+        [9,  pf.PQ,    1.00, 0.0, 0.0,  0.0, 0.40, 0.15, -INF, INF],
+        [10, pf.PQ,    1.00, 0.0, 0.0,  0.0, 0.30, 0.10, -INF, INF],
     ])
 
 
 def line_data():
+    # from, to, R, X, B_total
     return np.array([
         [1, 2, 0.02, 0.06, 0.06],
         [1, 3, 0.08, 0.24, 0.04],
@@ -45,6 +61,11 @@ def line_data():
         [3, 5, 0.05, 0.15, 0.02],
         [4, 5, 0.02, 0.06, 0.02],
         [5, 6, 0.01, 0.03, 0.01],
+        [4, 7, 0.03, 0.09, 0.03],
+        [7, 10, 0.04, 0.12, 0.03],
+        [5, 8, 0.04, 0.12, 0.03],
+        [8, 9, 0.03, 0.09, 0.02],
+        [6, 10, 0.05, 0.15, 0.03],
     ])
 
 
@@ -71,23 +92,6 @@ def run_loss(bus, lines, flex_idx_list, q_vec):
     except RuntimeError:
         return float("inf")
     return total_p_loss(V, theta, lines)
-
-
-def sweep_grid_brute_force(bus, lines, flex_idx_list, q_axes):
-    """N-D sweep. Returns a loss array shaped like the grid axes."""
-    shape = tuple(len(ax) for ax in q_axes)
-    losses = np.empty(shape)
-    for idx in np.ndindex(*shape):
-        q_vec = [q_axes[d][idx[d]] for d in range(len(q_axes))]
-        losses[idx] = run_loss(bus, lines, flex_idx_list, q_vec)
-    return losses
-
-
-def find_minimum_brute_force(q_axes, losses):
-    flat = int(np.argmin(losses))
-    multi = np.unravel_index(flat, losses.shape)
-    q_star = tuple(q_axes[d][multi[d]] for d in range(len(q_axes)))
-    return q_star, float(losses[multi]), multi
 
 
 # ---------- binary search (golden-section coordinate descent) ----------
@@ -152,79 +156,49 @@ def find_minimum_binary_search(bus, lines, flex_idx_list, bounds,
     return tuple(float(qi) for qi in q), float(new_loss), n_evals
 
 
-# ---------- method runners (timing wrappers) ----------
+# ---------- timing wrapper ----------
 
-def run_brute_force_method(bus, lines, flex_idx_list, n_per_axis, bounds):
-    q_axes = [np.linspace(lo, hi, n_per_axis) for lo, hi in bounds]
-    t0 = time.perf_counter()
-    losses = sweep_grid_brute_force(bus, lines, flex_idx_list, q_axes)
-    q_star, loss_star, idx_star = find_minimum_brute_force(q_axes, losses)
-    elapsed = time.perf_counter() - t0
-    n_evals = int(np.prod([len(ax) for ax in q_axes]))
-    return q_star, loss_star, n_evals, elapsed, q_axes, losses, idx_star
-
-
-def run_binary_search_method(bus, lines, flex_idx_list, bounds, tol=1e-3):
+def run_binary_search_method(bus, lines, flex_idx_list, bounds,
+                             tol=1e-3, max_outer=20):
     t0 = time.perf_counter()
     q_star, loss_star, n_evals = find_minimum_binary_search(
-        bus, lines, flex_idx_list, bounds, tol=tol)
+        bus, lines, flex_idx_list, bounds, tol=tol, max_outer=max_outer)
     elapsed = time.perf_counter() - t0
     return q_star, loss_star, n_evals, elapsed
 
 
+# ---------- output ----------
+
 def print_header(bus, flex_bus_nums):
-    print("=" * 70)
-    print(f"OPF phase 1b: brute-force sweep at flex buses {flex_bus_nums}")
-    print("=" * 70)
+    n_pq = int(np.sum(bus[:, pf.BUS_TYPE].astype(int) == pf.PQ))
+    n_flex = len(flex_bus_nums)
+    pct = 100.0 * n_flex / n_pq
+    print("=" * 78)
+    print("OPF on 10-bus system: binary search (golden-section coordinate descent)")
+    print("=" * 78)
     print(f"Total load:  P = {np.sum(bus[:, pf.P_LOAD]):.2f} pu, "
           f"Q = {np.sum(bus[:, pf.Q_LOAD]):.2f} pu")
+    print(f"Flex buses:  {flex_bus_nums} — "
+          f"{n_flex} of {n_pq} PQ buses ({pct:.0f}%)")
 
 
-def print_grid_2d_brute_force(q_axes, losses, idx_star, flex_bus_nums):
-    qa, qb = q_axes
-    bus_a, bus_b = flex_bus_nums
-    print(f"\nLoss grid (P_loss in pu).  cols = Q_{bus_a},  rows = Q_{bus_b}\n")
-    header = "         " + "".join(f"{q:>8.2f}" for q in qa)
-    print(header)
-    print("        +" + "-" * (8 * len(qa)))
-    for j, q_b in enumerate(qb):
-        line = f"{q_b:>+7.2f} |"
-        for i in range(len(qa)):
-            val = losses[i, j]
-            mark = "*" if (i, j) == idx_star else " "
-            line += f"{val:>7.4f}{mark}"
-        print(line)
-    print("\n(* marks the minimum)")
+def print_optimization_result(q_star, flex_bus_nums, n_evals, wall_s,
+                              tol, max_outer):
+    print(f"\nSolver:      tol = {tol:.0e}, max_outer = {max_outer}")
+    print(f"Result:      converged in {n_evals} PF calls, "
+          f"{wall_s:.2f} s wall time")
+    print("\nOptimum (Q at flex buses):")
+    for b, q in zip(flex_bus_nums, q_star):
+        print(f"  Q_{b} = {q:+.3f} pu")
 
 
-def print_summary(baseline, q_star, loss_star, flex_bus_nums):
+def print_summary(baseline, loss_star):
     reduction = (baseline - loss_star) / baseline * 100
-    q_str = ", ".join(f"Q_{b}={q:+.3f}" for b, q in zip(flex_bus_nums, q_star))
-    print("\n" + "=" * 70)
-    print(f"Baseline (all flex Q = 0):  {baseline:>9.5f} pu")
-    print(f"Minimum loss:                {loss_star:>9.5f} pu  ({q_str})")
-    print(f"Loss reduction:              {reduction:>9.2f} %")
-    print("=" * 70)
-
-
-def print_comparison(results):
-    """Print a comparison table for multiple OPF method results.
-
-    `results` items: (method_name, q_star, loss_star, n_evals, wall_ms).
-    """
-    print("\n" + "=" * 80)
-    print("METHOD COMPARISON")
-    print("=" * 80)
-    print(f"{'Method':<32} {'P_loss (pu)':>13} {'PF calls':>10} {'wall (ms)':>12}")
-    print("-" * 80)
-    for name, _, loss_star, n_evals, wall_ms in results:
-        print(f"{name:<32} {loss_star:>13.6f} {n_evals:>10d} {wall_ms:>12.2f}")
-    print("-" * 80)
-    print("\nMinimisers found (Q values per flex bus):")
-    for name, q_star, *_ in results:
-        q_str = ", ".join(f"{q:+.4f}" for q in q_star)
-        print(f"  {name:<32} ({q_str})")
-    print("=" * 80)
+    print("\n" + "=" * 78)
+    print(f"Baseline (all flex Q = 0):   {baseline:>9.5f} pu")
+    print(f"Minimum loss:                 {loss_star:>9.5f} pu")
+    print(f"Loss reduction:               {reduction:>9.2f} %")
+    print("=" * 78)
 
 
 def main():
@@ -235,30 +209,17 @@ def main():
     print_header(bus, FLEX_BUS_NUMS)
 
     bounds = [(-0.5, 1.0)] * len(flex_idx_list)
+    tol = 1e-3
+    max_outer = 20
 
-    bf_q, bf_loss, bf_calls, bf_t, q_axes, losses, idx_star = \
-        run_brute_force_method(bus, lines, flex_idx_list, 11, bounds)
-    if len(flex_idx_list) == 2:
-        print_grid_2d_brute_force(q_axes, losses, idx_star, FLEX_BUS_NUMS)
+    q_star, loss_star, n_evals, elapsed = run_binary_search_method(
+        bus, lines, flex_idx_list, bounds, tol=tol, max_outer=max_outer)
 
-    bs_q, bs_loss, bs_calls, bs_t = run_binary_search_method(
-        bus, lines, flex_idx_list, bounds, tol=1e-3)
-
-    bf21_q, bf21_loss, bf21_calls, bf21_t, *_ = run_brute_force_method(
-        bus, lines, flex_idx_list, 21, bounds)
-    bf51_q, bf51_loss, bf51_calls, bf51_t, *_ = run_brute_force_method(
-        bus, lines, flex_idx_list, 51, bounds)
-
-    results = [
-        ("brute force 11x11",        bf_q,   bf_loss,   bf_calls,   bf_t * 1000),
-        ("brute force 21x21",        bf21_q, bf21_loss, bf21_calls, bf21_t * 1000),
-        ("brute force 51x51",        bf51_q, bf51_loss, bf51_calls, bf51_t * 1000),
-        ("binary search (gs c-desc)",bs_q,   bs_loss,   bs_calls,   bs_t * 1000),
-    ]
-    print_comparison(results)
+    print_optimization_result(q_star, FLEX_BUS_NUMS, n_evals,
+                              elapsed, tol, max_outer)
 
     baseline = run_loss(bus, lines, flex_idx_list, [0.0] * len(flex_idx_list))
-    print_summary(baseline, bs_q, bs_loss, FLEX_BUS_NUMS)
+    print_summary(baseline, loss_star)
 
 
 if __name__ == "__main__":
