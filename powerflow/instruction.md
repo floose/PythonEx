@@ -18,23 +18,23 @@ correctness, readability, competitive performance.
 - `jacobian_vectorization.md` — full speedup writeup.
 
 ## Working conventions
-- **Reason before coding.** Always propose design first; wait for explicit "go".
+- **Reason before coding.** Always propose design first; wait for explicit "go". 
 - **Functions ≤ 50 lines.** Split when exceeded.
 - **Single-responsibility functions.** Generic helpers stay generic;
   method-specific functions get suffixed (e.g. `_brute_force`,
   `_binary_search`).
+- **Significative functions names** — - Name should be specific and unique. Avoid generic terms (`data`, `handler`, for instance)
 - **No code without authorization** — even simple-looking edits.
-- **Validation discipline.** Three-tier tests (7-bus baseline, 6-bus
-  vs pandapower bit-exact, 500-bus). Run after every refactor.
+- **No code duplication** — Extract shared logic into a function/module.
+- **Validation discipline.** Create test scripts. Run after every refactor.
 - **Commits handled by user.** Don't commit unless asked.
 
 ## Current state
-- Phase 3c done: NR solver 2.25× faster than pandapower at 500 buses.
+- Done: NR solver 2.25× faster than pandapower at 500 buses.
 - OPF: binary search is the standard sweeper. 10-bus, 5-flex example works.
-- Open paths: A2 (adjoint sensitivities via NR Jacobian), Kron's loss
-  formula, IPOPT integration.
+- Open paths: Method of adjoint sensitivities via NR Jacobian, then IPOPT integration.
 
-## Claude's role
+## AI agent's role
 Domain-aware engineer/teacher. Explain theory deeply when asked.
 Propose designs, never assume authorization. Keep responses tight
 unless depth is requested.
