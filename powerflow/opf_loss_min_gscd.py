@@ -1,4 +1,4 @@
-"""OPF on a 10-bus system using binary search (golden-section coordinate descent).
+"""OPF on a 10-bus system using golden-section coordinate descent (GSCD).
 
 A 10-bus meshed system with 1 slack, 2 PV generators and 7 PQ buses.
 Five of the seven PQ buses (70%) are flexible reactive-power injectors.
@@ -14,7 +14,7 @@ History — DEPRECATED brute-force comparison
     Earlier versions of this script also included a brute-force grid
     sweep for comparison. At d = 2 it was competitive (121 PFs vs ~75);
     by d = 5 the cliff is decisive: 11^5 = 161 051 PFs (~5 minutes) vs
-    binary search's ~400 PFs (~1 second), at ~150x worse precision.
+    GSCD's ~400 PFs (~1 second), at ~150x worse precision.
     Brute force was retired in this version. The functions
     sweep_grid_brute_force, find_minimum_brute_force,
     print_grid_2d_brute_force, run_brute_force_method, and
@@ -94,7 +94,7 @@ def run_loss(bus, lines, flex_idx_list, q_vec):
     return total_p_loss(V, theta, lines)
 
 
-# ---------- binary search (golden-section coordinate descent) ----------
+# ---------- golden-section coordinate descent (GSCD) ----------
 
 def _golden_section_1d(f, lo, hi, tol):
     """Find x in [lo, hi] that minimises a unimodal scalar f.
@@ -120,7 +120,7 @@ def _golden_section_1d(f, lo, hi, tol):
     return 0.5 * (a + b), n_evals
 
 
-def find_minimum_binary_search(bus, lines, flex_idx_list, bounds,
+def find_minimum_gscd(bus, lines, flex_idx_list, bounds,
                                tol=1e-3, max_outer=20):
     """Coordinate descent + golden-section line search.
 
@@ -158,10 +158,10 @@ def find_minimum_binary_search(bus, lines, flex_idx_list, bounds,
 
 # ---------- timing wrapper ----------
 
-def run_binary_search_method(bus, lines, flex_idx_list, bounds,
+def run_gscd_method(bus, lines, flex_idx_list, bounds,
                              tol=1e-3, max_outer=20):
     t0 = time.perf_counter()
-    q_star, loss_star, n_evals = find_minimum_binary_search(
+    q_star, loss_star, n_evals = find_minimum_gscd(
         bus, lines, flex_idx_list, bounds, tol=tol, max_outer=max_outer)
     elapsed = time.perf_counter() - t0
     return q_star, loss_star, n_evals, elapsed
@@ -174,7 +174,7 @@ def print_header(bus, flex_bus_nums):
     n_flex = len(flex_bus_nums)
     pct = 100.0 * n_flex / n_pq
     print("=" * 78)
-    print("OPF on 10-bus system: binary search (golden-section coordinate descent)")
+    print("OPF on 10-bus system: golden-section coordinate descent (GSCD)")
     print("=" * 78)
     print(f"Total load:  P = {np.sum(bus[:, pf.P_LOAD]):.2f} pu, "
           f"Q = {np.sum(bus[:, pf.Q_LOAD]):.2f} pu")
@@ -212,7 +212,7 @@ def main():
     tol = 1e-3
     max_outer = 20
 
-    q_star, loss_star, n_evals, elapsed = run_binary_search_method(
+    q_star, loss_star, n_evals, elapsed = run_gscd_method(
         bus, lines, flex_idx_list, bounds, tol=tol, max_outer=max_outer)
 
     print_optimization_result(q_star, FLEX_BUS_NUMS, n_evals,
