@@ -25,7 +25,7 @@ correctness, readability, competitive performance.
   `_gscd`).
 - **Significative functions names** — - Name should be specific and unique. Avoid generic terms (`data`, `handler`, for instance)
 - **No code without authorization** — even simple-looking edits.
-- **No code duplication** — Extract shared logic into a function/module.
+- **No code duplication** — Extract shared logic into a function/module (test scripts may inline system data so inputs stay explicit).
 - **Validation discipline.** Create test scripts. Run after every refactor.
 - **Commits handled by user.** Don't commit unless asked.
 
