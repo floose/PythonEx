@@ -114,9 +114,50 @@ def print_zbus(Z, bus, max_full=15):
     print("=" * 70)
 
 
+# ---------- state indices and loss gradient (OPF primitives) ----------
+
+def state_indices(bus):
+    """Return (non_slack_idx, pq_idx) — the active-state index sets used by NR."""
+    types = bus[:, BUS_TYPE].astype(int)
+    pq_idx = np.where((types == PQ) | (types == SVC))[0]
+    non_slack_idx = np.where(types != SLACK)[0]
+    return non_slack_idx, pq_idx
+
+
+def loss_state_gradient(V, theta, lines):
+    """Closed-form gradient of total real-power losses w.r.t. (theta, V).
+
+    Returns (df_dtheta, df_dV), each length n. Per-line contribution:
+        P_loss_l = G_l * (V_i^2 + V_j^2 - 2*V_i*V_j*cos(theta_i - theta_j))
+    Both ends of every line contribute via np.bincount accumulation.
+    """
+    f_idx = lines[:, FROM_BUS].astype(int) - 1
+    t_idx = lines[:, TO_BUS].astype(int) - 1
+    r = lines[:, R]
+    x = lines[:, X]
+    G = r / (r * r + x * x)
+
+    Vi = V[f_idx]
+    Vj = V[t_idx]
+    dth = theta[f_idx] - theta[t_idx]
+    sin_dth = np.sin(dth)
+    cos_dth = np.cos(dth)
+
+    contrib_theta_i = G * 2.0 * Vi * Vj * sin_dth
+    contrib_V_i = G * 2.0 * (Vi - Vj * cos_dth)
+    contrib_V_j = G * 2.0 * (Vj - Vi * cos_dth)
+
+    n = len(V)
+    df_dtheta = np.bincount(f_idx, weights=contrib_theta_i, minlength=n)
+    df_dtheta -= np.bincount(t_idx, weights=contrib_theta_i, minlength=n)
+    df_dV = np.bincount(f_idx, weights=contrib_V_i, minlength=n)
+    df_dV += np.bincount(t_idx, weights=contrib_V_j, minlength=n)
+    return df_dtheta, df_dV
+
+
 # ---------- power injections ----------
 
-def _power_injections(V, theta, Y):
+def power_injections(V, theta, Y):
     n = len(V)
     Ycoo = Y.tocoo()
     rows, cols = Ycoo.row, Ycoo.col
@@ -148,7 +189,7 @@ def _mismatches(P_calc, Q_calc, P_spec, Q_spec, pq_idx, non_slack_idx, Q_limited
 
 # ---------- Jacobian ----------
 
-def _jacobian(V, theta, Y, P, Q, pq_idx, non_slack_idx):
+def jacobian(V, theta, Y, P, Q, pq_idx, non_slack_idx):
     n = len(V)
     Ycoo = Y.tocoo()
     rows, cols = Ycoo.row, Ycoo.col
@@ -233,8 +274,7 @@ def newton_raphson(bus, lines, tol=1e-6, max_iter=20, verbose=True):
     P_spec = (bus[:, P_GEN] - bus[:, P_LOAD])  # Pgen - Pload
     Q_spec = (bus[:, Q_GEN] - bus[:, Q_LOAD])  # Qgen - Qload
 
-    pq_idx        = np.where((types == PQ) | (types == SVC))[0]
-    non_slack_idx = np.where(types != SLACK)[0]
+    non_slack_idx, pq_idx = state_indices(bus)
     Q_limited     = set()
 
     if verbose:
@@ -245,7 +285,7 @@ def newton_raphson(bus, lines, tol=1e-6, max_iter=20, verbose=True):
                 print(f"  Bus {int(bus[i,BUS_NUM])} (idx {i}): Q_min={bus[i,Q_MIN]:.2f}, Q_max={bus[i,Q_MAX]:.2f}")
 
     for it in range(1, max_iter + 1):
-        P, Q = _power_injections(V, theta, Y)
+        P, Q = power_injections(V, theta, Y)
 
         # Check and clamp Q limits for SVC buses
         Q_limited = _check_q_limits(Q, bus)
@@ -267,7 +307,7 @@ def newton_raphson(bus, lines, tol=1e-6, max_iter=20, verbose=True):
 
         if err < tol:
             return V, theta, Y, Q, it
-        Jac = _jacobian(V, theta, Y, P, Q, pq_idx, non_slack_idx)
+        Jac = jacobian(V, theta, Y, P, Q, pq_idx, non_slack_idx)
         dx = spsolve(Jac, f)
         V, theta = _update_state(V, theta, dx, pq_idx, non_slack_idx)
 
@@ -357,7 +397,7 @@ def print_losses(V, theta, lines, bus=None):
 
 
 def print_results(V, theta, Y, Q, bus):
-    P, _ = _power_injections(V, theta, Y)
+    P, _ = power_injections(V, theta, Y)
     types = bus[:, BUS_TYPE].astype(int)
     Pload = bus[:, P_LOAD]
     Qload = bus[:, Q_LOAD]
